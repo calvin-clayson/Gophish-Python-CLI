@@ -30,8 +30,8 @@ To successfully use the CSV importing function, CSV files need to be formatted a
 The correct format is that the first row needs to include the following exactly:
 "firstname,lastname,email,position"
 The subsequent rows will be filled out with target information such as:
-"Phshing,Target,victimemail@example.com,testtarget
-Example,User,useremail@domain.com,manager"
+"Phshing,Target,victimemail@​example.com,testtarget
+Example,User,useremail@​domain.com,manager"
 
 The script, when importing, does have some error-handling capabilities if the CSV file format is not precise.
 Error handling includes attempting to normalize the first row for the keys (meaning if you have more than four attributes in the first row, it will attempt to pull out the necessary ones),
