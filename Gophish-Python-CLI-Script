@@ -1,0 +1,1597 @@
+#For this script to work, Gophish must be running and accessible via its API.
+
+from dotenv import load_dotenv
+import os
+import csv
+from gophish import Gophish
+from gophish.models import *
+from termcolor import cprint
+import base64
+import requests
+import argparse
+from urllib.parse import urlparse
+
+def parse_arguments():
+    parser = argparse.ArgumentParser(description="GoPhish Campaign Management Script")
+    parser.add_argument("--skip-setup", action="store_true", help="Skip setup questions and use preloaded values")
+    #Not finished or tested all the way
+    #parser.add_argument("-URL", "--api-url", dest="api_url", type=str, default="127.0.0.1", help="GoPhish API host or full URL. Examples: 192.168.0.1  or https://host:3333/")
+    return parser.parse_args()
+
+#Not Finished or Tested all the way
+def normalize_api_url(value: str) -> str:
+    if not value:
+        return "https://127.0.0.1:3333/"
+    v = value.strip()
+    if v.startswith("http://") or v.startswith("https://"):
+        return v if v.endswith("/") else v + "/"
+    if ":" in v:
+        url = f"https://{v}"
+        return url if url.endswith("/") else url + "/"
+    return f"https://{v}:3333/"
+
+def run_script(args):
+    if args.skip_setup:
+        dotenv_api_key_setup()
+        return
+    api_url = normalize_api_url(getattr(args, 'api_url', None))
+    dotenv_setup_question()
+    dotenv_api_key_setup()
+    api_connection_check(api_url)
+
+
+#------------------------------- Setup and Connection to GoPhish API -----------------------------------#
+#Preloads a .env file path for the GoPhish API key to allow skipping of the dotenv setup questions and functions, while still allowing the user to create their own .env file and input a different path if they choose to do so
+global Preloaded_Dotenv_API_Key_Path
+#This variable can be hardcoded, but beaware of security implications of hardcoding file paths and API keys in scripts. It's generally recommended to use environment variables or configuration files that are not included in version control for sensitive information like API keys.
+Preloaded_Dotenv_API_Key_Path = ""
+global API
+
+#Asks user if they have a .env file with the GoPhish API key and prompts them to create one if they do not have one, or if they input an invalid response
+def dotenv_setup_question():
+    while True:
+        API_Question = input("Do you have a .env file path for the GoPhish API key? (yes/no/exit) (enter to skip if preloaded): ").strip().lower()
+        if API_Question == '':
+            if Preloaded_Dotenv_API_Key_Path and os.path.isfile(Preloaded_Dotenv_API_Key_Path):
+                break
+            else:
+                cprint("No preloaded .env file path found. Please create a .env file with the GoPhish API key for this script to work.", "red")
+                cprint("The .env file should have the following format:", "yellow")
+                cprint("GO_PHISH_API_KEY=your_api_key_here", "green")
+                continue
+        if API_Question == 'yes':
+            break
+        if API_Question == 'no':
+            cprint("You must create a .env file with the GoPhish API key for this script to work.", "red")
+            cprint("If you want to exit the script instead of creating a .env file, type 'exit' at the next prompt.", "red")
+            cprint("The .env file should have the following format:", "yellow")
+            cprint("GO_PHISH_API_KEY=your_api_key_here", "green")
+            continue
+        if API_Question == 'exit':
+            cprint("Exiting script. Please create a .env file with the GoPhish API key to use this script.", "red")
+        cprint("Invalid response. Please enter yes or no.", "red")
+        
+#Asks user for the path to the .env file with the GoPhish API key and attempts to load it, handling errors if the file is not found or if the API key is not found in the file
+#User can enter a preloaded file path to skip some sections
+def dotenv_api_key_setup():
+    global Preloaded_Dotenv_API_Key_Path
+    global API
+    while True:
+        if Preloaded_Dotenv_API_Key_Path and os.path.isfile(Preloaded_Dotenv_API_Key_Path):
+            load_dotenv(dotenv_path=Preloaded_Dotenv_API_Key_Path)
+            API_KEY = os.getenv("GO_PHISH_API_KEY")
+            if API_KEY:
+                API = Gophish(API_KEY)
+                HEADERS = { "Authorization": API_KEY}
+                cprint("GoPhish API key loaded successfully from preloaded path.", "green")
+                cprint("-----------------------------", "white")
+                break
+            else:
+                cprint("GO_PHISH_API_KEY not found in the preloaded .env file. Please check the file and try again.", "red")
+        Dotenv_path = input("Enter the path to the .env file with the GoPhish API key: ")
+        if os.path.isfile(Dotenv_path):
+            load_dotenv(dotenv_path=Dotenv_path)
+            API_KEY = os.getenv("GO_PHISH_API_KEY")
+            if API_KEY:
+                API = Gophish(API_KEY)
+                HEADERS = { "Authorization": API_KEY}
+                cprint("GoPhish API key loaded successfully.", "green")
+                cprint("-----------------------------", "white")
+                break
+            else:
+                cprint("GO_PHISH_API_KEY not found in the .env file. Please check the file and try again.", "red")
+        else:
+            cprint("File not found. Please enter a valid file path.", "red")
+
+#Ensures that the script can connect to the GoPhish API before proceeding, and handles connection errors with user-friendly messages and retry options
+#If --URL is deleted, delete api_url: str
+def api_connection_check(api_url: str):
+    while True:
+        try:
+            response = requests.get(api_url, verify=False)
+            if response.status_code == 200:
+                cprint("Successfully connected to GoPhish API.", "green")
+                cprint("-----------------------------", "white")
+                break
+        except Exception as connection_error:
+            cprint(f"Error connecting to GoPhish API: {connection_error}", "red")
+            cprint("Please check your API key and ensure that GoPhish is running and accessible.", "red")
+            retry = input("Do you want to try connecting again? (yes/no): ").strip().lower()
+            if retry != 'yes':
+                cprint("Exiting script due to connection issues.", "red")
+                exit()
+
+run_script(parse_arguments())
+
+cprint ("IMPORTANT: ***Gophish must be launched and running for this script to work properly.***", "red")
+
+targets = []
+
+#------------------------------- Creation Functions -----------------------------------#
+
+#Creates a function to create a group in Gophish
+def create_group_for_gophish():
+    try:
+        #Creates a group in Gophish with a chosen name
+        chosengroupname = input("Choose a name for the group: ")
+        #Creates a group object with the chosen name and imported targets
+        
+        group_obj = Group(name=chosengroupname, targets=targets)
+        #Sends the group object to the GoPhish API to create the group
+        created_group = API.groups.post(group_obj)
+        cprint(f"Created group: id={created_group.id} name={created_group.name} targets={len(created_group.targets)}", "red")
+    
+    except Exception as group_creation_error:
+        print(f"An error occurred while creating the group: {group_creation_error}")
+
+#Creates a function to import targets from a CSV file
+#csv_filepath parameter in the function can be hardcoded
+def import_targets_from_csv(csv_filepath=None):
+    global targets
+    targets = []
+
+    try:
+        #If csv_filepath is not provided as an argument, it prompts the user to enter the path to the CSV file with targets, or allows them to skip if they do not have one
+        if csv_filepath is None:
+            csv_filepath = input("Enter the path to the CSV file with targets: ").strip()
+
+        while True:
+            #If the file path is valid, it breaks the loop and continues with importing targets from the CSV file
+            if os.path.isfile(csv_filepath):
+                break
+            #If the user inputs 'exit', it breaks the loop and exits the CSV target import
+            if csv_filepath.lower() == 'exit':
+                break
+            #If the file path is invalid, it prompts the user to enter a valid file path or type 'exit' to quit the CSV target import
+            cprint("File not found. Please enter a valid file path. Type 'exit' to quit.", "red")
+            #Asks user for the path to the CSV file with targets again if the previous input was invalid
+            csv_filepath = input("Enter the path to the CSV file with targets: ").strip()
+
+        try:
+            targets = []
+            # Open the CSV and validate header and rows for consistency
+            with open(csv_filepath, newline='') as csvfile:
+                reader = csv.reader(csvfile)
+                header = next(reader, None)
+                if not header:
+                    cprint("CSV file is empty. No targets imported.", "red")
+                    return []
+
+                # Normalize header names
+                header_norm = [h.strip().lower() for h in header]
+                col_count = len(header_norm)
+
+                # Helper to find a header index from alternatives
+                def find_idx(alts):
+                    for a in alts:
+                        if a in header_norm:
+                            return header_norm.index(a)
+                    return None
+
+                # Find indices for required columns with common variations in naming
+                first_index = find_idx(["firstname", "first_name"])
+                last_index = find_idx(["lastname", "last_name"])
+                email_index = find_idx(["email", "email_address"])
+                pos_index = find_idx(["position", "job_title"])
+
+                #Fails if required columns are missing
+                if first_index is None or last_index is None or email_index is None:
+                    cprint("CSV missing required columns: firstname, lastname, email.", "red")
+                    return []
+
+                #Increments through rows in the CSV file and creates User objects for each valid row, while handling rows with missing or extra columns and skipping rows missing required fields
+                line_num = 1  # header line
+                for row in reader:
+                    line_num += 1
+                    # Handle rows with missing trailing columns by padding them
+                    if len(row) < col_count:
+                        row = row + [""] * (col_count - len(row))
+                    # If a row has more columns than the header, warn and skip
+                    elif len(row) > col_count:
+                        cprint(f"Row {line_num} has {len(row)} columns; expected {col_count}.", "red")
+                        continue
+
+                    firstname = row[first_index].strip()
+                    lastname = row[last_index].strip()
+                    email = row[email_index].strip()
+                    #Checks to ensure email contains an "@" symbol as a basic validation of email format, and skips rows with invalid email formats
+                    if "@" not in email:
+                        cprint(f"Row {line_num} has invalid email format: '{email}'. Skipping.", "red")
+                        continue
+                    #Handles optional position column, allowing it to be missing or empty without failing the import of the row
+                    position = None
+                    if pos_index is not None:
+                        pos_val = row[pos_index].strip()
+                        position = pos_val if pos_val != "" else None
+
+                    # Skip rows missing required values but continue importing others
+                    if not firstname or not lastname or not email:
+                        cprint(f"Row {line_num} missing required fields; skipping.", "red")
+                        continue
+
+                    user = User(first_name=firstname, last_name=lastname, email=email, position=position)
+                    targets.append(user)
+
+                print(f"Imported {len(targets)} targets from {csv_filepath}.")
+            return targets
+        except Exception as csv_error:
+            cprint(f"Exiting CSV target import: {csv_error}", "yellow")
+    
+    except Exception as file_error:
+        cprint(f"An error occurred while accessing the file: {file_error}", "red")
+        return []
+
+#Creates a function to create an email template in Gophish
+def create_email_template():
+    try:
+        #Gathers user input for the emailtemplate variable that will be created
+        nameoftemplate = input("Enter a name for the email template: ").strip()
+        emailsubject = input("Enter the subject line for the email: ").strip()
+        textemailbody = input("Enter the text body of the email: ").strip()
+        htmlemailbody = input("Enter the HTML body of the email: ").strip()
+        attachments = []
+        
+        while True:
+            cprint("Note: File attachments may only be added when creating a new email template. Modifying an existing template to add attachments causes issues with how Gophish handles names.", "yellow")
+            addfileattachment = input("Do you want to add a file attachment to the email template? (yes/no): ").strip().lower()
+            if addfileattachment == 'yes':
+                file_path = input("Enter the path to the file to attach (or type '0' to cancel adding attachments): ").strip()
+                if file_path.lower() == '0' or file_path == '':
+                    break
+                if not os.path.isfile(file_path):
+                    cprint("File not found. Please enter a valid file path.", "red")
+                    continue
+                try:
+                    with open(file_path, 'rb') as f:
+                        data = f.read()
+                    encoded = base64.b64encode(data).decode('utf-8')
+                    attachments.append({
+                        "name": os.path.basename(file_path),
+                        "content": encoded
+                    })
+                    cprint(f"Attached file: {os.path.basename(file_path)}", "green")
+                except Exception as file_attachment_error:
+                    cprint(f"Error reading file: {file_attachment_error}", "red")
+                    continue
+            elif addfileattachment == 'no':
+                break
+            else:
+                cprint("Invalid input. Please enter 'yes' or 'no'.", "red")
+
+        payload = {
+            "name": nameoftemplate,
+            "subject": emailsubject,
+            "html": htmlemailbody,
+            "text": textemailbody
+        }
+
+        if attachments:
+            payload["attachments"] = attachments
+        try:
+            endpoint = "api/templates/"
+            resp = API.templates.api.execute("POST", endpoint, json=payload)
+            if not resp.ok:
+                cprint(f"Failed to create template: {resp.status_code} {resp.text}", "red")
+                return
+            created_template = API.templates._cls.parse(resp.json())
+            cprint(f"Created email template: id={created_template.id} name={created_template.name}", "red")
+        except Exception as template_error:
+            cprint(f"Error creating template: {template_error}", "red")
+    
+    except Exception as template_creation_error:
+        cprint(f"An error occurred while creating the email template: {template_creation_error}", "red")
+
+#Creates a function to create a landing page in Gophish
+def create_landing_page():
+    try:
+        #Gathers user input for the landingpage variable that will be created
+        nameoflandingpage = input("Enter a name for the landing page: ")
+        htmllandingcontent = input("Enter the HTML content for the landing page: ")
+        capturecredentials = input("Do you want to capture credentials on this landing page? (yes/no): ").strip().lower()
+        #Asks user if they want to capture credentials or passwords on the landing page and assigns boolean values accordingly
+        if capturecredentials == 'yes':
+            capture_credentials = True
+            #Asks user if they want to capture passwords on the landing page and assigns boolean values accordingly
+            #This is nested within the capture credentials condition since capturing passwords requires capturing credentials first
+            capturepasswords = input("Do you want to capture passwords on this landing page? (yes/no): ").strip().lower()
+            if capturepasswords == 'yes':
+                capture_passwords = True
+            else:
+                capture_passwords = False
+        else:
+            capture_credentials = False
+            capture_passwords = False
+
+        #Creates the landing page object
+        landingpage= Page(name=nameoflandingpage, html=htmllandingcontent, capture_credentials=capture_credentials, capture_passwords=capture_passwords)
+        #Sends the landing page object to the GoPhish API to create the landing page
+        created_landingpage = API.pages.post(landingpage)
+        cprint(f"Created landing page: id={created_landingpage.id} name={created_landingpage.name}", "red")
+    
+    except Exception as landing_page_creation_error:
+        cprint(f"An error occurred while creating the landing page: {landing_page_creation_error}", "red")
+
+#Creates a function to create a sending profile in Gophish
+def create_sending_profile():
+    try:
+        SMTPprofilename = input("Enter a name for the sending profile: ")
+        #Defaults the interface type to SMTP for sending profiles
+        interfacetype = "SMTP"
+        fromaddress = input("Enter the 'From' email address (e.g., sender@example.com): ")
+        hostandport = input("Enter the SMTP server host and port (e.g., smtp.example.com:587): ")
+        SMTPusername = input("Enter the SMTP username: ")
+        SMTPpassword = input("Enter the SMTP password: ")
+        cprint("Note: If your SMTP server uses a self-signed certificate, you may want to ignore certification errors. This is not recommended for production environments.", "yellow")
+        while True:
+            smtpcertification = input("Do you want to ignore SMTP certification errors? (yes/no): ").strip().lower()
+            if smtpcertification == 'yes':
+                smtpignorecertificationerrors = True
+                break
+            elif smtpcertification == 'no':
+                smtpignorecertificationerrors = False
+                break
+            else:
+                cprint("Invalid input. Please enter 'yes' or 'no'.", "red")
+
+        sendingprofile = SMTP(name=SMTPprofilename, interface_type=interfacetype, from_address=fromaddress, host=hostandport, username=SMTPusername, password=SMTPpassword, ignore_cert_errors=smtpignorecertificationerrors)
+        created_sendingprofile = API.smtp.post(sendingprofile)
+        print(f"Created sending profile: id={created_sendingprofile.id} name={created_sendingprofile.name}")
+    
+    except Exception as sending_profile_creation_error:
+        print(f"An error occurred while creating the sending profile: {sending_profile_creation_error}")
+
+#------------------------------- View Functions -----------------------------------#
+#A series of functions to view existing resources in Gophish
+#The various creating function sources helped also with creating the viewing functions
+
+#Function for viewing targets that have been imported into the script via CSV
+def view_targets():
+    try:
+        cprint("Current Targets:", "white")
+        cprint("____________________________________________________________", "white")
+        cprint("| First Name - Last Name - Email - Position", "white")
+        cprint("____________________________________________________________", "white")
+        for target in targets:
+            cprint(f"| {target.first_name} - {target.last_name} - {target.email} - {target.position}", "white")
+        cprint("____________________________________________________________", "white")
+    
+    except Exception as view_targets_error:
+        print(f"An error occurred while viewing targets: {view_targets_error}")
+
+#Function for viewing groups that have been created along with their associated targets in Gophish
+def view_groups():
+    try:
+        groups = API.groups.get()
+        if not groups:
+                print("No groups available to delete.")
+                return
+        cprint("Groups:", "white")
+        for listnumber, groupobject in enumerate(groups, start=1):
+            cprint(f"{listnumber}. Group ID= {groupobject.id} Group Name= {groupobject.name}", "red")
+        while True:
+            groupchoice = input("Enter the group list number to view its targets (or 0 to cancel): ").strip()
+            if groupchoice == "0":
+                cprint("Cancelled viewing group targets.", "red")
+                return
+            
+            try:
+                groupnumberchoice = int(groupchoice)
+            except ValueError:
+                cprint("Please type a list number.", "red")
+                continue
+            
+            if 1 <= groupnumberchoice <= len(groups):
+                chosen_group = groups[groupnumberchoice-1]
+                break
+            cprint("No group matched that list number. Try again.", "red")
+
+        cprint(f"Targets in group '{chosen_group.name}':", "white")
+        for target in chosen_group.targets:
+            cprint(f"{target.first_name} {target.last_name} - {target.email} - {target.position}", "white")
+    
+    except Exception as view_groups_error:
+        print(f"An error occurred while viewing groups: {view_groups_error}")
+
+#Function for viewing email templates that have been created in Gophish, along with other options
+def view_templates():
+    try:
+        email_template = API.templates.get()
+        if not email_template:
+            print("No email templates available to delete.")
+            return
+        cprint("Email Templates:", "white")
+        for listnumber, templateobject in enumerate(email_template, start=1):
+            cprint(f"{listnumber}. Template ID= {templateobject.id} Template Name= {templateobject.name}", "red")
+
+        while True:
+            templatechoice = input("Enter the template list number to view its HTML content (or 0 to cancel): ").strip()
+            if templatechoice == "0":
+                cprint("Cancelled viewing template content.", "red")
+                return
+            
+            try:
+                templatenumberchoice = int(templatechoice)
+            except ValueError:
+                cprint("Please type a list number.", "red")
+                continue
+            
+            if 1 <= templatenumberchoice <= len(email_template):
+                chosen_template = email_template[templatenumberchoice-1]
+                break
+            cprint("No template matched that list number. Try again.", "red")
+        #cprint(f"Sender Address: '{chosen_template.sender_address}':", "white")
+        cprint(f"Subject: '{chosen_template.subject}':", "white")
+        
+        while True:
+            view_rawtext = input("Do you want to view the raw text content? (yes/no): ").strip().lower()
+            if view_rawtext == 'yes':
+                cprint(f"{chosen_template.text}", "white")
+                break
+            elif view_rawtext == 'no':
+                break
+            else:
+                cprint("Invalid input. Please enter 'yes' or 'no'.", "red")
+        
+        while True:
+            view_rawhtml = input("Do you want to view the raw HTML content? (yes/no): ").strip().lower()
+            if view_rawhtml == 'yes':
+                cprint(f"{chosen_template.html}", "white")
+                break
+            elif view_rawhtml == 'no':
+                break
+            else:
+                cprint("Invalid input. Please enter 'yes' or 'no'.", "red")
+
+    except Exception as view_templates_error:
+        cprint(f"An error occurred while viewing templates: {view_templates_error}", "red")
+
+#Function for viewing landing pages that have been created in Gophish, along with other options
+def view_landing_pages():
+    try:
+        landing_pages = API.pages.get()
+        if not landing_pages:
+            print("No landing pages available to delete.")
+            return
+        cprint("Landing Pages:", "white")
+        for listnumber, pageobject in enumerate(landing_pages, start=1):
+            cprint(f"{listnumber}. Page ID= {pageobject.id} Page Name= {pageobject.name}", "red")
+
+            while True:
+                pagechoice = input("Enter the landing page list number to view its HTML content and other attributes(or 0 to cancel): ").strip()
+                if pagechoice == "0":
+                    cprint("Cancelled viewing landing page content.", "red")
+                    return
+                
+                try:
+                    pagenumberchoice = int(pagechoice)
+                except ValueError:
+                    cprint("Please type a list number.", "red")
+                    continue
+                
+                if 1 <= pagenumberchoice <= len(landing_pages):
+                    chosen_page = landing_pages[pagenumberchoice-1]
+                    break
+                cprint("No landing page matched that list number. Try again.", "red")
+            cprint(f"HTML content for landing page '{chosen_page.name}':", "white")
+
+            while True:
+                view_rawhtml = input("Do you want to view the raw HTML content? (yes/no): ").strip().lower()
+                if view_rawhtml == 'yes':
+                    cprint(f"{chosen_page.html}", "white")
+                    break
+                elif view_rawhtml == 'no':
+                    break
+                else:
+                    cprint("Invalid input. Please enter 'yes' or 'no'.", "red")
+            cprint(f"Capture Credentials: {chosen_page.capture_credentials}", "white")
+            cprint(f"Capture Passwords: {chosen_page.capture_passwords}", "white")
+            cprint(f"Redirect URL: {chosen_page.redirect_url}", "white")
+
+    except Exception as view_landing_pages_error:
+        cprint(f"An error occurred while viewing landing pages: {view_landing_pages_error}", "red")
+
+#Function for viewing the sending profiles that have been created in Gophish, along with other options
+def view_sending_profiles():
+    try:
+        sending_profiles = API.smtp.get()
+        if not sending_profiles:
+            print("No sending profiles available to delete.")
+            return
+        cprint("Sending Profiles:", "white")
+        for listnumber, smtpobject in enumerate(sending_profiles, start=1):
+            cprint(f"{listnumber}. SMTP ID= {smtpobject.id} SMTP Name= {smtpobject.name}", "red")
+        while True:
+            smtpchoice = input("Enter list number of the sending profile to delete (or 0 to cancel): ").strip()
+            if smtpchoice == "0":
+                print("Cancelled sending profile deletion.")
+                return
+            
+            try:
+                smtpnumberchoice = int(smtpchoice)
+            except ValueError:
+                print("Please type a list number.")
+                continue
+            
+            if 1 <= smtpnumberchoice <= len(sending_profiles):
+                chosen_smtp = sending_profiles[smtpnumberchoice-1]
+                break
+            print("No sending profile matched that list number. Try again.")
+        
+        cprint(f"SMTP From Address: '{chosen_smtp.from_address}':", "white")
+        cprint(f"SMTP Host: '{chosen_smtp.host}':", "white")
+        cprint(f"SMTP Ignore Certification Errors: '{chosen_smtp.ignore_cert_errors}':", "white")
+        while True:
+            view_smtp_username = input("Do you want to view the SMTP username? (yes/no): ").strip().lower()
+            if view_smtp_username == 'yes':
+                cprint(f"SMTP Username: '{chosen_smtp.username}':", "white")
+                break
+            elif view_smtp_username == 'no':
+                break
+            else:
+                cprint("Invalid input. Please enter 'yes' or 'no'.", "red")
+        while True:
+            view_smtp_password = input("Do you want to view the SMTP password? (yes/no): ").strip().lower()
+            if view_smtp_password == 'yes':
+                cprint(f"SMTP Password: '{chosen_smtp.password}':", "white")
+                break
+            elif view_smtp_password == 'no':
+                break
+            else:
+                cprint("Invalid input. Please enter 'yes' or 'no'.", "red")
+
+
+    except Exception as view_sending_profiles_error:
+        cprint(f"An error occurred while viewing sending profiles: {view_sending_profiles_error}", "red")
+
+#Function for viewing campaigns that have been created in Gophish, along with campaign status and information
+def view_campaigns():
+    try:
+        campaigns = API.campaigns.get()
+        if not campaigns:
+            print("No campaigns available.")
+            return
+
+        for listnumberforcampaign, campaign in enumerate(campaigns, start=1):
+            cprint(f"{listnumberforcampaign}. id= {campaign.id} name= {campaign.name}", "red")
+
+        # Prompt user to select a campaign to view details/status
+        while True:
+            campaign_choice = input("Enter the campaign list number to view details (or 0 to cancel): ").strip()
+            if campaign_choice == "0":
+                cprint("Cancelled viewing campaign.", "red")
+                return
+            try:
+                campaign_index = int(campaign_choice)
+            except ValueError:
+                cprint("Please type a list number.", "red")
+                continue
+            if 1 <= campaign_index <= len(campaigns):
+                chosen_campaign = campaigns[campaign_index - 1]
+                break
+            cprint("No campaign matched that list number. Try again.", "red")
+
+        cprint(f"Campaign Name: {chosen_campaign.name}", "white")
+
+        # Try to get a summary (status and basic info)
+        try:
+            summary = API.campaigns.summary(campaign_id=chosen_campaign.id)
+            cprint(f"Campaign ID: {getattr(summary, 'id', 'N/A')}", "white")
+            campaign_status = getattr(summary, 'status', 'N/A')
+            if campaign_status == "In Progress":
+                cprint(f"Campaign Status: {campaign_status}", "red")
+            elif campaign_status == "Completed":
+                cprint(f"Campaign Status: {campaign_status}", "green")
+            else:
+                cprint(f"Campaign Status: {campaign_status}", "white")
+        except Exception:
+            # summary may not be available; continue to attempt to show stats
+            pass
+
+        # Attempt to collect stats from the chosen campaign using multiple fallbacks
+        stats = getattr(chosen_campaign, 'stats', None)
+        if not stats:
+            try:
+                statsdata = chosen_campaign.as_dict()
+                stats = statsdata.get('stats') or statsdata.get('results') or statsdata.get('data')
+            except Exception:
+                stats = None
+
+        if not stats:
+            cprint("No stats available for this campaign.", "white")
+            return
+
+        cprint("Campaign Stats:", "white")
+        for result in stats:
+            if isinstance(result, dict):
+                first = result.get('first_name')
+                last = result.get('last_name')
+                email = result.get('email')
+                position = result.get('position')
+                submissionstatus = result.get('status')
+            else:
+                first = getattr(result, 'first_name', None)
+                last = getattr(result, 'last_name', None)
+                email = getattr(result, 'email', None)
+                position = getattr(result, 'position', None)
+                submissionstatus = getattr(result, 'status', None)
+            cprint(f"Firstname: {first}", "white")
+            cprint(f"Lastname: {last}", "white")
+            cprint(f"Email: {email}", "white")
+            cprint(f"Position: {position}", "white")
+            if submissionstatus == "Submitted Data":
+                cprint(f"Submission Status: {submissionstatus}", "red")
+            else:
+                cprint(f"Submission Status: {submissionstatus}", "white")
+            cprint("--------------------------------------------------", "white")
+
+    except Exception as view_campaigns_error:
+        cprint(f"An error occurred while viewing campaigns: {view_campaigns_error}", "red")
+
+#------------------------------- Campaign Creation Function -----------------------------------#
+
+#This function creates a campaign in Gophish
+def create_campaign():
+    try:
+        campaignname = input("Enter a name for the campaign: ")
+
+        templates = API.templates.get()
+        if not templates:
+            print("No templates available. Create one first.")
+            return
+        cprint("Templates:", "white")
+        for listnumber, templateobject in enumerate(templates, start=1):
+            cprint(f"{listnumber}. Template ID= {templateobject.id} Template Name= {templateobject.name}", "red")
+        while True:
+            templatechoice = input("Enter list number (or 0 to cancel): ").strip()
+            if templatechoice == "0":
+                print("Cancelled campaign creation.")
+                return
+            
+            try:
+                templatenumberchoice = int(templatechoice)
+            except ValueError:
+                print("Please type a list number.")
+                continue
+            
+            if 1 <= templatenumberchoice <= len(templates):
+                chosen_template = templates[templatenumberchoice-1]
+                break
+            print("No template matched that list number. Try again.")
+
+        pages = API.pages.get()
+        
+        if not pages:
+            print("No landing pages available. Create one first.")
+            return
+        cprint("Landing Pages:", "white")
+        for listnumber, pageobject in enumerate(pages, start=1):
+            cprint(f"{listnumber}. Page ID= {pageobject.id} Page Name= {pageobject.name}", "red")
+        while True:
+            pagechoice = input("Enter list number (or 0 to cancel): ").strip()
+            if pagechoice == "0":
+                print("Cancelled campaign creation.")
+                return
+            
+            try:
+                pagenumberchoice = int(pagechoice)
+            except ValueError:
+                print("Please type a list number.")
+                continue
+            
+            if 1 <= pagenumberchoice <= len(pages):
+                chosen_page = pages[pagenumberchoice-1]
+                break
+            print("No landing page matched that list number. Try again.")
+
+        destionationlocation = input("Enter the destination URL for the campaign (Location of Gophish listener, targets must be able to reach URL): ")
+
+        sending_profiles = API.smtp.get()
+        if not sending_profiles:
+            print("No sending profiles available. Create one first.")
+            return
+        cprint("Sending Profiles:", "white")
+        for listnumber, smtpobject in enumerate(sending_profiles, start=1):
+            cprint(f"{listnumber}. SMTP ID= {smtpobject.id} SMTP Name= {smtpobject.name}", "red")
+        while True:
+            smtpchoice = input("Enter list number (or 0 to cancel): ").strip()
+            if smtpchoice == "0":
+                print("Cancelled campaign creation.")
+                return
+            
+            try:
+                smtpnumberchoice = int(smtpchoice)
+            except ValueError:
+                print("Please type a list number.")
+                continue
+            
+            if 1 <= smtpnumberchoice <= len(sending_profiles):
+                chosen_smtp = sending_profiles[smtpnumberchoice-1]
+                break
+            print("No sending profile matched that list number. Try again.")
+
+        groups = API.groups.get()
+        if not groups:
+            print("No groups available. Create one first.")
+            return
+        cprint("Groups:", "white")
+        for listnumber, groupobject in enumerate(groups, start=1): 
+            cprint(f"{listnumber}. Group ID= {groupobject.id} Group Name= {groupobject.name}", "red")
+        while True:
+            groupchoice = input("Enter list number (or 0 to cancel): ").strip()
+            if groupchoice == "0":
+                print("Cancelled campaign creation.")
+                return
+            
+            try:
+                groupnumberchoice = int(groupchoice)
+            except ValueError:
+                print("Please type a list number.")
+                continue
+            
+            if 1 <= groupnumberchoice <= len(groups):
+                chosen_group = groups[groupnumberchoice-1]
+                break
+            print("No group matched that list number. Try again.")
+
+        # Build the Campaign using the selected model objects (the client will serialize nested objects correctly)
+        campaign = Campaign(
+            name=campaignname,
+            template=chosen_template,
+            page=chosen_page,
+            url=destionationlocation,
+            smtp=chosen_smtp,
+            groups=[chosen_group]
+        )
+
+        created_campaign = API.campaigns.post(campaign)
+        cprint(f"Created campaign: id={created_campaign.id} name={created_campaign.name}", "red")
+    except Exception as campaign_creation_error:
+        print(f"An error occurred while creating the campaign: {campaign_creation_error}")
+
+#------------------------------- Questions Functions -----------------------------------#
+#Question functions to ensure creation, may be deprecated in the future with built in questions in the creation functions themselves, but for now they are separate to allow users to choose which resources they want to create in a more modular way, and to allow users to create resources in any order they choose instead of being forced to create certain resources before others based on the flow of the campaign creation function
+
+def groupcreationquestion():
+    #Asks user if they want to create a group in Gophish with the imported targets
+    groupcreateresponse = input("Do you want to create a group in Gophish with the imported targets? (yes/no): ").strip().lower()
+    if groupcreateresponse == 'yes':
+        #Attempts to create the group and handles any exceptions
+        try:
+            create_group_for_gophish()
+        except Exception as group_creation_error:
+            print(f"An error occurred while creating the group: {group_creation_error}")
+    else:
+        print("Group creation skipped.")
+
+def emailtemplatecreationquestion():
+    emailtemplateresponse = input("Do you want to create an email template in Gophish? (yes/no): ").strip().lower()
+    if emailtemplateresponse == 'yes':
+        #Attempts to create the email template and handles any exceptions
+        try:
+            create_email_template()
+        except Exception as email_template_error:
+            print(f"An error occurred while creating the email template: {email_template_error}")
+    else:
+        print("Email template creation skipped.")
+
+def landingpagecreationquestion():
+    landingpageresonse = input("Do you want to create a landing page in Gophish? (yes/no): ").strip().lower()
+    if landingpageresonse == 'yes':
+        #Attempts to create the landing page and handles any exceptions
+        try:
+            create_landing_page()
+        except Exception as landing_page_error:
+            print(f"An error occurred while creating the landing page: {landing_page_error}")
+    else:
+        print("Landing page creation skipped.")
+
+def sendprofilecreationquestion():
+    sendprofileresonse = input("Do you want to create a sending profile in Gophish? (yes/no): ").strip().lower()
+    if sendprofileresonse == 'yes':
+        #Attempts to create the sending profile and handles any exceptions
+        #try:
+            create_sending_profile()
+        #except Exception as sending_profile_error:
+            #print(f"An error occurred while creating the sending profile: {sending_profile_error}")
+    else:
+        print("Sending profile creation skipped.")
+
+def campaigncreationquestion():
+    campaignresonse = input("Do you want to create a campaign in Gophish? (yes/no): ").strip().lower()
+    if campaignresonse == 'yes':
+        #Attempts to create the campaign and handles any exceptions
+        #try:
+            create_campaign()
+        #except Exception as campaign_error:
+            #print(f"An error occurred while creating the campaign: {campaign_error}")
+    else:
+        print("Campaign creation skipped.")
+
+#------------------------------- Delete Functions -----------------------------------#
+def delete_campaign():
+    campaigns = API.campaigns.get()
+    if not campaigns:
+        print("No campaigns available to delete.")
+        return
+    cprint("Campaigns:", "white")
+    for listnumber, campaignobject in enumerate(campaigns, start=1):
+        cprint(f"{listnumber}. Campaign ID= {campaignobject.id} Campaign Name= {campaignobject.name}", "red")
+    while True:
+        campaignchoice = input("Enter list number of the campaign to delete (or 0 to cancel): ").strip()
+        if campaignchoice == "0":
+            print("Cancelled campaign deletion.")
+            return
+        
+        try:
+            campaigndeletechoice = int(campaignchoice)
+        except ValueError:
+            print("Please type a list number.")
+            continue
+        
+        if 1 <= campaigndeletechoice <= len(campaigns):
+            chosen_campaign = campaigns[campaigndeletechoice-1]
+            break
+        print("No campaign matched that list number. Try again.")
+
+    try:
+        API.campaigns.delete(chosen_campaign.id)
+        print(f"Deleted campaign: id={chosen_campaign.id} name={chosen_campaign.name}")
+    except Exception as delete_error:
+        print(f"An error occurred while deleting the campaign: {delete_error}")
+
+def delete_group():
+    groups = API.groups.get()
+    if not groups:
+        print("No groups available to delete.")
+        return
+    cprint("Groups:", "white")
+    for listnumber, groupobject in enumerate(groups, start=1):
+        cprint(f"{listnumber}. Group ID= {groupobject.id} Group Name= {groupobject.name}", "red")
+    while True:
+        groupchoice = input("Enter list number of the group to delete (or 0 to cancel): ").strip()
+        if groupchoice == "0":
+            print("Cancelled group deletion.")
+            return
+        
+        try:
+            groupnumberchoice = int(groupchoice)
+        except ValueError:
+            print("Please type a list number.")
+            continue
+        
+        if 1 <= groupnumberchoice <= len(groups):
+            chosen_group = groups[groupnumberchoice-1]
+            break
+        print("No group matched that list number. Try again.")
+
+    try:
+        API.groups.delete(chosen_group.id)
+        print(f"Deleted group: id={chosen_group.id} name={chosen_group.name}")
+    except Exception as delete_error:
+        print(f"An error occurred while deleting the group: {delete_error}")
+
+def delete_email_template():
+    email_template = API.templates.get()
+    if not email_template:
+        print("No email templates available to delete.")
+        return
+    cprint("Email Templates:", "white")
+    for listnumber, templateobject in enumerate(email_template, start=1):
+        cprint(f"{listnumber}. Template ID= {templateobject.id} Template Name= {templateobject.name}", "red")
+    while True:
+        templatechoice = input("Enter list number of the email template to delete (or 0 to cancel): ").strip()
+        if templatechoice == "0":
+            print("Cancelled email template deletion.")
+            return
+        
+        try:
+            templatenumberchoice = int(templatechoice)
+        except ValueError:
+            print("Please type a list number.")
+            continue
+        
+        if 1 <= templatenumberchoice <= len(email_template):
+            chosen_template = email_template[templatenumberchoice-1]
+            break
+        print("No email template matched that list number. Try again.")
+
+    try:
+        API.templates.delete(chosen_template.id)
+        print(f"Deleted email template: id={chosen_template.id} name={chosen_template.name}")
+    except Exception as delete_error:
+            print(f"An error occurred while deleting the email template: {delete_error}")
+
+def delete_landing_page():
+    landing_pages = API.pages.get()
+    if not landing_pages:
+        print("No landing pages available to delete.")
+        return
+    cprint("Landing Pages:", "white")
+    for listnumber, pageobject in enumerate(landing_pages, start=1):
+        cprint(f"{listnumber}. Page ID= {pageobject.id} Page Name= {pageobject.name}", "red")
+    while True:
+        pagechoice = input("Enter list number of the landing page to delete (or 0 to cancel): ").strip()
+        if pagechoice == "0":
+            print("Cancelled landing page deletion.")
+            return
+        
+        try:
+            pagenumberchoice = int(pagechoice)
+        except ValueError:
+            print("Please type a list number.")
+            continue
+        
+        if 1 <= pagenumberchoice <= len(landing_pages):
+            chosen_page = landing_pages[pagenumberchoice-1]
+            break
+        print("No landing page matched that list number. Try again.")
+
+    try:
+        API.pages.delete(chosen_page.id)
+        print(f"Deleted landing page: id={chosen_page.id} name={chosen_page.name}")
+    except Exception as delete_error:
+            print(f"An error occurred while deleting the landing page: {delete_error}")
+
+def delete_sending_profile():
+    sending_profiles = API.smtp.get()
+    if not sending_profiles:
+        print("No sending profiles available to delete.")
+        return
+    cprint("Sending Profiles:", "white")
+    for listnumber, smtpobject in enumerate(sending_profiles, start=1):
+        cprint(f"{listnumber}. SMTP ID= {smtpobject.id} SMTP Name= {smtpobject.name}", "red")
+    while True:
+        smtpchoice = input("Enter list number of the sending profile to delete (or 0 to cancel): ").strip()
+        if smtpchoice == "0":
+            print("Cancelled sending profile deletion.")
+            return
+        
+        try:
+            smtpnumberchoice = int(smtpchoice)
+        except ValueError:
+            print("Please type a list number.")
+            continue
+        
+        if 1 <= smtpnumberchoice <= len(sending_profiles):
+            chosen_smtp = sending_profiles[smtpnumberchoice-1]
+            break
+        print("No sending profile matched that list number. Try again.")
+
+    try:
+        API.smtp.delete(chosen_smtp.id)
+        print(f"Deleted sending profile: id={chosen_smtp.id} name={chosen_smtp.name}")
+    except Exception as delete_error:
+            print(f"An error occurred while deleting the sending profile: {delete_error}")
+
+#------------------------------- Modify Functions -----------------------------------#
+def modify_group():
+    modify_groups = API.groups.get()
+    if not modify_groups:
+        print("No groups available to modify.")
+        return
+    cprint("Groups:", "white")
+    for listnumber, groupobject in enumerate(modify_groups, start=1):
+        cprint(f"{listnumber}. Group ID= {groupobject.id} Group Name= {groupobject.name}", "red")
+    while True:
+        groupchoice = input("Enter list number of the group to modify (or 0 to cancel): ").strip()
+        if groupchoice == "0":
+            print("Cancelled group modification.")
+            return
+        
+        try:
+            groupnumberchoice = int(groupchoice)
+        except ValueError:
+            print("Please type a list number.")
+            continue
+        
+        if 1 <= groupnumberchoice <= len(modify_groups):
+            chosen_group = modify_groups[groupnumberchoice-1]
+            break
+        print("No group matched that list number. Try again.")
+
+    try:
+        while True:
+            modification_choice = input("Enter 'name' to modify group name, 'targets' to modify group targets, or '0' to finish: ").strip().lower()
+            if modification_choice == "0":
+                break
+            elif modification_choice == "name":
+                new_name = input("Enter the new name for the group: ").strip()
+                chosen_group.name = new_name
+                try:
+                    API.groups.put(chosen_group)
+                    cprint(f"Group name updated to: {chosen_group.name}", "green")
+                except Exception as update_error:
+                    cprint(f"An error occurred while updating the group name: {update_error}", "red")
+            elif modification_choice == "targets":
+                print("Current targets in the group:")
+                # Support target entries that may be returned as dicts or model objects
+                def get_field(target_field, field_name):
+                    if isinstance(target_field, dict):
+                        return target_field.get(field_name)
+                    return getattr(target_field, field_name, None)
+
+                for target in chosen_group.targets:
+                    first = get_field(target, 'first_name')
+                    last = get_field(target, 'last_name')
+                    email = get_field(target, 'email')
+                    cprint(f"{first} {last} - {email}", "white")
+                target_action = input("Enter 'add' to add targets, 'remove' to remove targets, or '0' to return: ").strip().lower()
+                if target_action == "add":
+                    new_targets_input = input("Enter new targets to add (format: first_name last_name email), separated by a space: ").strip()
+                    new_targets_list = new_targets_input.split(";")
+                    for target_str in new_targets_list:
+                        try:
+                            first_name, last_name, email = target_str.strip().split()
+                            # Append a plain dict to avoid mixing object types from the API
+                            new_target = { 'first_name': first_name, 'last_name': last_name, 'email': email }
+                            chosen_group.targets.append(new_target)
+                            try:
+                                API.groups.put(chosen_group)
+                                cprint(f"Added target: {first_name} - {last_name} - {email}", "green")
+                            except Exception as update_error:
+                                cprint(f"An error occurred while updating the group targets: {update_error}", "red")
+                                # If update failed, remove the appended target to keep local state consistent
+                                chosen_group.targets = [failed_target for failed_target in chosen_group.targets if get_field(failed_target, 'email') != email]
+                        except ValueError:
+                            cprint(f"Invalid target format: '{target_str}'. Skipping.", "red")
+                elif target_action == "remove":
+                    remove_email = input("Enter the email of the target to remove: ").strip()
+                    original_count = len(chosen_group.targets)
+                    new_targets = [target_email for target_email in chosen_group.targets if get_field(target_email, 'email') != remove_email]
+                    if len(new_targets) == original_count:
+                        cprint(f"No target with email '{remove_email}' found in the group.", "red")
+                        continue
+                    chosen_group.targets = new_targets
+                    try:
+                        API.groups.put(chosen_group)
+                        cprint(f"Target with email '{remove_email}' removed from group.", "green")
+                    except Exception as update_error:
+                        cprint(f"An error occurred while updating the group targets: {update_error}", "red")
+                elif target_action == "0":
+                    break
+                else:
+                    cprint("Invalid action. Please enter 'add', 'remove', or '0'.", "red")
+            else:
+                cprint("Invalid modification choice. Please enter 'name', 'targets', or '0'.", "red")
+    except Exception as modify_error:
+        print(f"An error occurred while modifying the group: {modify_error}")
+
+def modify_email_template():
+    modify_email_template = API.templates.get()
+    if not modify_email_template:
+        print("No email templates available to modify.")
+        return
+    cprint("Email Templates:", "white")
+    for listnumber, templateobject in enumerate(modify_email_template, start=1):
+        cprint(f"{listnumber}. Template ID= {templateobject.id} Template Name= {templateobject.name}", "red")
+    
+    while True:
+        templatechoice = input("Enter list number of the email template to modify (or 0 to cancel): ").strip()
+        if templatechoice == "0":
+            print("Cancelled email template modification.")
+            return
+        try:
+            templatenumberchoice = int(templatechoice)
+        except ValueError:
+            print("Please type a list number.")
+            continue
+        if 1 <= templatenumberchoice <= len(modify_email_template):
+            chosen_template = modify_email_template[templatenumberchoice-1]
+            break
+        print("No email template matched that list number. Try again.")
+
+    try:
+        while True:
+            email_template_action = input("Enter 'name' to modify template name, 'subject' to modify subject, 'html' to modify HTML body, 'text' to modify text body, or '0' to finish: ").strip().lower()
+            if email_template_action == "0":
+                break
+            elif email_template_action == "name":
+                new_name = input("Enter the new name for the email template: ").strip()
+                try:
+                    current = None
+                    try:
+                        current = API.templates.get(chosen_template.id)
+                    except Exception:
+                        current = chosen_template
+                    current.name = new_name
+                    resp = API.templates.put(current)
+                    updated_name = getattr(resp, 'name', getattr(current, 'name', None))
+                    cprint(f"Email template name updated to: {updated_name}", "green")
+                    if resp:
+                        chosen_template = resp
+                except Exception as update_error:
+                    cprint(f"An error occurred while updating the email template name: {update_error}", "red")
+            elif email_template_action == "subject":
+                new_subject = input("Enter the new subject for the email template: ").strip()
+                chosen_template.subject = new_subject
+                try:
+                    try:
+                        current = API.templates.get(chosen_template.id)
+                    except Exception:
+                        current = chosen_template
+                    current.subject = new_subject
+                    resp = API.templates.put(current)
+                    updated_subj = getattr(resp, 'subject', getattr(current, 'subject', None))
+                    cprint(f"Email template subject updated to: {updated_subj}", "green")
+                    if resp:
+                        chosen_template = resp
+                except Exception as update_error:
+                    cprint(f"An error occurred while updating the email template subject: {update_error}", "red")
+            elif email_template_action == "html":
+                new_html = input("Enter the new HTML body for the email template: ").strip()
+                chosen_template.html = new_html
+                try:
+                    try:
+                        current = API.templates.get(chosen_template.id)
+                    except Exception:
+                        current = chosen_template
+                    current.html = new_html
+                    resp = API.templates.put(current)
+                    cprint(f"Email template HTML body updated.", "green")
+                    if resp:
+                        chosen_template = resp
+                except Exception as update_error:
+                    cprint(f"An error occurred while updating the email template HTML body: {update_error}", "red")
+            elif email_template_action == "text":
+                new_text = input("Enter the new text body for the email template: ").strip()
+                chosen_template.text = new_text
+                try:
+                    try:
+                        current = API.templates.get(chosen_template.id)
+                    except Exception:
+                        current = chosen_template
+                    current.text = new_text
+                    resp = API.templates.put(current)
+                    cprint(f"Email template text body updated.", "green")
+                    if resp:
+                        chosen_template = resp
+                except Exception as update_error:
+                    cprint(f"An error occurred while updating the email template text body: {update_error}", "red")
+            # Attachment modification has been removed from this script.
+
+            else:
+                cprint("Invalid action. Please enter 'name', 'subject', 'html', 'text', or '0'.", "red")
+    except Exception as modify_error:
+        print(f"An error occurred while modifying the email template: {modify_error}")
+
+def modify_landing_page():
+    modify_landing_page = API.pages.get()
+    if not modify_landing_page:
+        print("No landing pages available to modify.")
+        return
+    cprint("Landing Pages:", "white")
+    for listnumber, pageobject in enumerate(modify_landing_page, start=1):
+        cprint(f"{listnumber}. Page ID= {pageobject.id} Page Name= {pageobject.name}", "red")
+    while True:        
+        pagechoice = input("Enter list number of the landing page to modify (or 0 to cancel): ").strip()
+        if pagechoice == "0":
+            print("Cancelled landing page modification.")
+            return
+        try:
+            pagenumberchoice = int(pagechoice)
+        except ValueError:
+            print("Please type a list number.")
+            continue
+        if 1 <= pagenumberchoice <= len(modify_landing_page):
+            chosen_page = modify_landing_page[pagenumberchoice-1]
+            break
+        print("No landing page matched that list number. Try again.")
+
+    try:
+        while True:
+            landing_page_action = input("Enter 'name' to modify page name, 'html' to modify HTML content, 'capture' to modify credential capture settings, or '0' to finish: ").strip().lower()
+            if landing_page_action == "0":
+                break
+            elif landing_page_action == "name":
+                new_name = input("Enter the new name for the landing page: ").strip()
+                chosen_page.name = new_name
+                try:
+                    current = None
+                    try:
+                        current = API.pages.get(chosen_page.id)
+                    except Exception:
+                        current = chosen_page
+                    current.name = new_name
+                    resp = API.pages.put(current)
+                    updated_name = getattr(resp, 'name', getattr(current, 'name', None))
+                    cprint(f"Landing page name updated to: {updated_name}", "green")
+                    if resp:
+                        chosen_page = resp
+                except Exception as update_error:
+                    cprint(f"An error occurred while updating the landing page name: {update_error}", "red")
+            elif landing_page_action == "html":
+                new_html = input("Enter the new HTML content for the landing page: ").strip()
+                chosen_page.html = new_html
+                try:
+                    current = None
+                    try:
+                        current = API.pages.get(chosen_page.id)
+                    except Exception:
+                        current = chosen_page
+                    current.html = new_html
+                    resp = API.pages.put(current)
+                    cprint(f"Landing page HTML content updated.", "green")
+                    if resp:
+                        chosen_page = resp
+                except Exception as update_error:
+                    cprint(f"An error occurred while updating the landing page HTML content: {update_error}", "red")
+            elif landing_page_action == "capture":
+                capturecredentials = input("Do you want to capture credentials on this landing page? (yes/no): ").strip().lower()
+                if capturecredentials == 'yes':
+                    capture_credentials = True
+                    capturepasswords = input("Do you want to capture passwords on this landing page? (yes/no): ").strip().lower()
+                    if capturepasswords == 'yes':
+                        capture_passwords = True
+                    else:
+                        capture_passwords = False
+                else:
+                    capture_credentials = False
+                    capture_passwords = False
+                chosen_page.capture_credentials = capture_credentials
+                chosen_page.capture_passwords = capture_passwords
+                try:
+                    current = None
+                    try:
+                        current = API.pages.get(chosen_page.id)
+                    except Exception:
+                        current = chosen_page
+                    current.capture_credentials = capture_credentials
+                    current.capture_passwords = capture_passwords
+                    resp = API.pages.put(current)
+                    cprint(f"Landing page credential capture settings updated.", "green")
+                    if resp:
+                        chosen_page = resp
+                except Exception as update_error:
+                    cprint(f"An error occurred while updating the landing page credential capture settings: {update_error}", "red")
+            else:
+                cprint("Invalid action. Please enter 'name', 'html', 'capture', or '0'.", "red")
+    except Exception as modify_error:
+        print(f"An error occurred while modifying the landing page: {modify_error}")
+
+def modify_sending_profile():
+    modify_sending_profile = API.smtp.get()
+    if not modify_sending_profile:
+        print("No sending profiles available to modify.")
+        return
+    cprint("Sending Profiles:", "white")
+    for listnumber, smtpobject in enumerate(modify_sending_profile, start=1):
+        cprint(f"{listnumber}. SMTP ID= {smtpobject.id} SMTP Name= {smtpobject.name}", "red")
+    while True:
+        smtpchoice = input("Enter list number of the sending profile to modify (or 0 to cancel): ").strip()
+        if smtpchoice == "0":
+            print("Cancelled sending profile modification.")
+            return
+        try:
+            smtpnumberchoice = int(smtpchoice)
+        except ValueError:
+            print("Please type a list number.")
+            continue
+        if 1 <= smtpnumberchoice <= len(modify_sending_profile):
+            chosen_smtp = modify_sending_profile[smtpnumberchoice-1]
+            break
+        print("No sending profile matched that list number. Try again.")
+
+    try:
+        while True:
+            modification_choice = input("Enter 'name' to modify sending profile name, 'host' to modify SMTP host, 'from' to modify from sender email address, 'username' to modify SMTP username, 'password' to modify SMTP password, 'certification' to modify SMTP certification settings, or '0' to finish: ").strip().lower()
+            if modification_choice == "0":
+                break
+            elif modification_choice == "name":
+                new_name = input("Enter the new name for the sending profile: ").strip()
+                chosen_smtp.name = new_name
+                try:
+                    current = None
+                    try:
+                        current = API.smtp.get(chosen_smtp.id)
+                    except Exception:
+                        current = chosen_smtp
+                    current.name = new_name
+                    resp = API.smtp.put(current)
+                    updated_name = getattr(resp, 'name', getattr(current, 'name', None))
+                    cprint(f"Sending profile name updated to: {updated_name}", "green")
+                    if resp:
+                        chosen_smtp = resp
+                except Exception as update_error:
+                    cprint(f"An error occurred while updating the sending profile name: {update_error}", "red")
+            elif modification_choice == "host":
+                cprint("Note: SMTP host format should be hostname:port (e.g., smtp.example.com:587)", "yellow")
+                new_host = input("Enter the new SMTP host for the sending profile: ").strip()
+                chosen_smtp.host = new_host
+                try:
+                    current = None
+                    try:
+                        current = API.smtp.get(chosen_smtp.id)
+                    except Exception:
+                        current = chosen_smtp
+                    current.host = new_host
+                    resp = API.smtp.put(current)
+                    updated_host = getattr(resp, 'host', getattr(current, 'host', None))
+                    cprint(f"Sending profile SMTP host updated to: {updated_host}", "green")
+                    if resp:
+                        chosen_smtp = resp
+                except Exception as update_error:
+                    cprint(f"An error occurred while updating the sending profile SMTP host: {update_error}", "red")
+            elif modification_choice == "from":
+                cprint("Note: From sender email address should be in a valid email format (e.g., example@address.com)", "yellow")
+                new_from = input("Enter the new from sender email address for the sending profile: ").strip()
+                if new_from and "@" not in new_from:
+                    cprint("Invalid email address format. Please include an '@' symbol.", "red")
+                    continue
+                chosen_smtp.from_address = new_from
+                try:
+                    current = None
+                    try:
+                        current = API.smtp.get(chosen_smtp.id)
+                    except Exception:
+                        current = chosen_smtp
+                    current.from_address = new_from
+                    resp = API.smtp.put(current)
+                    updated_from = getattr(resp, 'from_address', getattr(current, 'from_address', None))
+                    cprint(f"Sending profile from sender email address updated to: {updated_from}", "green")
+                    if resp:
+                        chosen_smtp = resp
+                except Exception as update_error:
+                    cprint(f"An error occurred while updating the sending profile from sender email address: {update_error}", "red")
+            elif modification_choice == "username":
+                new_username = input("Enter the new SMTP username for the sending profile: ").strip()
+                chosen_smtp.username = new_username
+                try:
+                    current = None
+                    try:
+                        current = API.smtp.get(chosen_smtp.id)
+                    except Exception:
+                        current = chosen_smtp
+                    current.username = new_username
+                    resp = API.smtp.put(current)
+                    updated_username = getattr(resp, 'username', getattr(current, 'username', None))
+                    cprint(f"Sending profile SMTP username updated to: {updated_username}", "green")
+                    if resp:
+                        chosen_smtp = resp
+                except Exception as update_error:
+                    cprint(f"An error occurred while updating the sending profile SMTP username: {update_error}", "red")
+            elif modification_choice == "password":
+                new_password = input("Enter the new SMTP password for the sending profile: ").strip()
+                chosen_smtp.password = new_password
+                try:
+                    current = None
+                    try:
+                        current = API.smtp.get(chosen_smtp.id)
+                    except Exception:
+                        current = chosen_smtp
+                    current.password = new_password
+                    resp = API.smtp.put(current)
+                    cprint(f"Sending profile SMTP password updated.", "green")
+                    if resp:
+                        chosen_smtp = resp
+                except Exception as update_error:
+                    cprint(f"An error occurred while updating the sending profile SMTP password: {update_error}", "red")
+            elif modification_choice == "certification":
+                smtpcertification = input("Do you want to ignore SMTP certification errors? (yes/no): ").strip().lower()
+                if smtpcertification == 'yes':
+                    try:
+                        current = None
+                        try:
+                            current = API.smtp.get(chosen_smtp.id)
+                        except Exception:
+                            current = chosen_smtp
+                        current.ignore_cert_errors = True
+                        resp = API.smtp.put(current)
+                        cprint(f"Sending profile SMTP certification error setting updated to ignore errors.", "green")
+                        if resp:
+                            chosen_smtp = resp
+                    except Exception as update_error:
+                        cprint(f"An error occurred while updating the sending profile SMTP certification error setting: {update_error}", "red")
+                elif smtpcertification == 'no':
+                    try:
+                        current = None
+                        try:
+                            current = API.smtp.get(chosen_smtp.id)
+                        except Exception:
+                            current = chosen_smtp
+                        current.ignore_cert_errors = False
+                        resp = API.smtp.put(current)
+                        cprint(f"Sending profile SMTP certification error setting updated to not ignore errors.", "green")
+                        if resp:
+                            chosen_smtp = resp
+                    except Exception as update_error:
+                        cprint(f"An error occurred while updating the sending profile SMTP certification error setting: {update_error}", "red")
+                else:
+                    cprint("Invalid input. Please enter 'yes' or 'no'.", "red")
+            else:
+                cprint("Invalid modification choice. Please enter 'name', 'host', 'port', 'from', 'username', 'password', or '0'.", "red")
+    except Exception as modify_error:
+        print(f"An error occurred while modifying the sending profile: {modify_error}")
+#------------------------------- Menu Interface -----------------------------------#
+
+#Predefine User_response variable to be used in menu interface loop
+User_response = -1
+
+def creation_menu():
+    cprint ("Option 1: Create Group in Gophish with imported targets", "green")
+    cprint ("Option 2: Create Email Template in Gophish", "green")
+    cprint ("Option 3: Create Landing Page in Gophish", "green")
+    cprint ("Option 4: Create Sending Profile in Gophish", "green")
+    cprint ("Option 5: Create Campaign in Gophish", "green")
+    cprint ("Option 0: Return to Main Menu", "red")
+
+def view_menu():
+    cprint ("Option 1: View Targets", "white")
+    cprint ("Option 2: View Groups", "white")
+    cprint ("Option 3: View Email Templates", "white")
+    cprint ("Option 4: View Landing Pages", "white")
+    cprint ("Option 5: View Sending Profiles", "white")
+    cprint ("Option 6: View Campaigns", "white")
+    cprint ("Option 0: Return to Main Menu", "red")
+
+def delete_menu():
+    cprint ("Option 1: Delete Group", "red")
+    cprint ("Option 2: Delete Email Template", "red")
+    cprint ("Option 3: Delete Landing Page", "red")
+    cprint ("Option 4: Delete Sending Profile", "red")
+    cprint ("Option 5: Delete Campaign", "red")
+    cprint ("Option 0: Return to Main Menu", "red")
+
+def modify_menu():
+    cprint ("Option 1: Modify Group", "yellow")
+    cprint ("Option 2: Modify Email Template", "yellow")
+    cprint ("Option 3: Modify Landing Page", "yellow")
+    cprint ("Option 4: Modify Sending Profile", "yellow")
+    cprint ("Option 0: Return to Main Menu", "red")
+
+def main_menu():
+    cprint ("Option 1: Creation Menu", "green")
+    cprint ("Option 2: View Menu", "white")
+    cprint ("Option 3: Delete Menu", "red")
+    cprint ("Option 4: Modify Menu", "yellow")
+    cprint ("Option 5: Import Targets from CSV", "cyan")
+    cprint ("Option 0: Exit", "red")
+
+
+# Get user choice for menu option
+def user_choice(prompt="Enter your choice: "):
+    global User_response
+    try:
+        return int(input(prompt))
+    except ValueError:
+        return -1
+
+
+def creation_menu_loop():
+    creation_menu()
+    while True:
+        choice = user_choice("Creation menu - enter your choice (0 to return, 99 to show menu): ")
+        if choice == 0:
+            break
+        if choice == 99:
+            creation_menu()
+            continue
+        if choice == 1:
+            groupcreationquestion()
+        elif choice == 2:
+            emailtemplatecreationquestion()
+        elif choice == 3:
+            landingpagecreationquestion()
+        elif choice == 4:
+            sendprofilecreationquestion()
+        elif choice == 5:
+            campaigncreationquestion()
+        else:
+            cprint("Invalid choice. Please try again.", "red")
+        cprint("----------------------------", "white")
+
+
+def view_menu_loop():
+    view_menu()
+    while True:
+        choice = user_choice("View menu - enter your choice (0 to return, 99 to show menu): ")
+        if choice == 0:
+            break
+        if choice == 99:
+            view_menu()
+            continue
+        if choice == 1:
+            cprint("Warning: You must import targets first to view them", "white")
+            view_targets()
+        elif choice == 2:
+            view_groups()
+        elif choice == 3:
+            view_templates()
+        elif choice == 4:
+            view_landing_pages()
+        elif choice == 5:
+            view_sending_profiles()
+        elif choice == 6:
+            view_campaigns()
+        else:
+            cprint("Invalid choice. Please try again.", "red")
+        cprint("----------------------------", "white")
+
+def delete_menu_loop():
+    delete_menu()
+    while True:
+        choice = user_choice("Delete menu - enter your choice (0 to return, 99 to show menu): ")
+        if choice == 0:
+            break
+        if choice == 99:
+            delete_menu()
+            continue
+        if choice == 1:
+            delete_group()
+        elif choice == 2:
+            delete_email_template()
+        elif choice == 3:
+            delete_landing_page()
+        elif choice == 4:
+            delete_sending_profile()
+        elif choice == 5:
+            delete_campaign()
+        else:
+            cprint("Invalid choice. Please try again.", "red")
+        cprint("----------------------------", "white")
+
+def modify_menu_loop():
+    modify_menu()
+    while True:
+        choice = user_choice("Modify menu - enter your choice (0 to return, 99 to show menu): ")
+        if choice == 0:
+            break
+        if choice == 99:
+            modify_menu()
+            continue
+        if choice == 1:
+            modify_group()
+        elif choice == 2:
+            modify_email_template()
+        elif choice == 3:
+            modify_landing_page()
+        elif choice == 4:
+            modify_sending_profile()
+        else:
+            cprint("Invalid choice. Please try again.", "red")
+        cprint("----------------------------", "white")
+
+
+def main_loop():
+    while True:
+        main_menu()
+        choice = user_choice()
+        if choice == 0:
+            cprint("Exiting.", "red")
+            break
+        elif choice == 1:
+            creation_menu_loop()
+        elif choice == 2:
+            view_menu_loop()
+        elif choice == 3:
+            delete_menu_loop()
+        elif choice == 4:
+            modify_menu_loop()
+        elif choice == 5:
+            import_targets_from_csv()
+        else:
+            cprint("Invalid choice. Please try again.", "red")
+        cprint("----------------------------", "white")
+
+
+if __name__ == '__main__':
+    main_loop()
