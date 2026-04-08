@@ -43,7 +43,7 @@ def run_script(args):
 #------------------------------- Setup and Connection to GoPhish API -----------------------------------#
 #Preloads a .env file path for the GoPhish API key to allow skipping of the dotenv setup questions and functions, while still allowing the user to create their own .env file and input a different path if they choose to do so
 global Preloaded_Dotenv_API_Key_Path
-#This variable can be hardcoded, but beaware of security implications of hardcoding file paths and API keys in scripts. It's generally recommended to use environment variables or configuration files that are not included in version control for sensitive information like API keys.
+#This variable can be hardcoded, but be aware of the security implications of hardcoding file paths and API keys in scripts. It's generally recommended to use environment variables or configuration files that are not included in version control for sensitive information like API keys.
 Preloaded_Dotenv_API_Key_Path = ""
 global API
 
@@ -69,7 +69,8 @@ def dotenv_setup_question():
             continue
         if API_Question == 'exit':
             cprint("Exiting script. Please create a .env file with the GoPhish API key to use this script.", "red")
-        cprint("Invalid response. Please enter yes or no.", "red")
+            exit()
+        cprint("Invalid response. Please enter yes/no/exit.", "red")
         
 #Asks user for the path to the .env file with the GoPhish API key and attempts to load it, handling errors if the file is not found or if the API key is not found in the file
 #User can enter a preloaded file path to skip some sections
