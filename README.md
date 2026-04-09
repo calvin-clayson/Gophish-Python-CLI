@@ -35,7 +35,7 @@ Example,User,useremail@​domain.com,manager"
 
 The script, when importing, does have some error-handling capabilities if the CSV file format is not precise.
 Error handling includes attempting to normalize the first row for the keys (meaning if you have more than four attributes in the first row, it will attempt to pull out the necessary ones),
-Skipping over rows and not importing the specific target if there is information missing, such as a proper email,
+Skipping over rows and not importing the specific target if there is information missing, such as an improper email,
 and skipping over rows that have too many attributes than the expected number.
 
 Creation Menu:
